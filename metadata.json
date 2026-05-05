@@ -1,0 +1,6 @@
+{
+  "name": "SentinelIAM",
+  "description": "An instant AWS IAM policy validator (Geometric Balance theme) that highlights overly permissive actions and resource risks.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
