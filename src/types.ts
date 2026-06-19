@@ -30,5 +30,6 @@ export interface ValidationIssue {
 export interface PolicyAnalysis {
   isValid: boolean;
   issues: ValidationIssue[];
+  score?: number;
   raw?: any;
 }

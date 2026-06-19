@@ -1,29 +1,59 @@
 /**
- * @license
- * SPDX-License-Identifier: Apache-2.0
+ * SentinelIAM — AWS IAM Policy Linter
+ * Redesigned: deep navy palette, animated score ring, Space Grotesk chrome,
+ * JetBrains Mono editor, tabbed right panel, Anthropic Claude AI backend.
  */
 
-import { useState, useEffect, useMemo } from 'react';
-import { 
-  Shield, 
-  ShieldAlert, 
-  ShieldCheck, 
-  Copy, 
-  Trash2, 
-  Sparkles, 
-  Terminal,
-  ChevronRight,
-  AlertTriangle,
-  Info,
-  CheckCircle2,
-  XCircle,
-  ExternalLink
-} from 'lucide-react';
-import { motion, AnimatePresence } from 'motion/react';
-import { GoogleGenAI } from "@google/genai";
-import Markdown from 'react-markdown';
-import { IAMPolicy, IAMStatement, ValidationIssue, PolicyAnalysis } from './types.ts';
+import { useState, useEffect } from 'react';
+import { ValidationIssue, PolicyAnalysis } from './types.ts';
 
+// ─── Inline SVG Icon system ────────────────────────────────────────────────
+interface IconProps { size?: number; className?: string; }
+
+const ShieldIcon = ({ size = 18 }: IconProps) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+  </svg>
+);
+const CopyIcon = ({ size = 14 }: IconProps) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M8 4H6a2 2 0 00-2 2v14a2 2 0 002 2h12a2 2 0 002-2V6a2 2 0 00-2-2h-2M8 4v4h8V4M8 4h8" />
+  </svg>
+);
+const TrashIcon = ({ size = 14 }: IconProps) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M3 6h18M19 6l-1 14H6L5 6M10 6V4h4v2" />
+  </svg>
+);
+const SparklesIcon = ({ size = 14 }: IconProps) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M12 3l1.5 4.5L18 9l-4.5 1.5L12 15l-1.5-4.5L6 9l4.5-1.5L12 3z" />
+    <path d="M4 17l.75 2.25L7 20l-2.25.75L4 23l-.75-2.25L1 20l2.25-.75L4 17z" />
+    <path d="M20 3l.75 2.25L23 6l-2.25.75L20 9l-.75-2.25L17 6l2.25-.75L20 3z" />
+  </svg>
+);
+const WandIcon = ({ size = 14 }: IconProps) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M15 4l5 5-9 9-5-5 9-9z" /><path d="M9 15l-5 5" /><path d="M20 4l-1-1" />
+  </svg>
+);
+const CheckIcon = ({ size = 14 }: IconProps) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M20 6L9 17l-5-5" />
+  </svg>
+);
+const TerminalIcon = ({ size = 14 }: IconProps) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M4 17l6-6-6-6M12 19h8" />
+  </svg>
+);
+const LockIcon = ({ size = 24 }: IconProps) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M19 11H5a2 2 0 00-2 2v7a2 2 0 002 2h14a2 2 0 002-2v-7a2 2 0 00-2-2zM7 11V7a5 5 0 0110 0v4" />
+  </svg>
+);
+
+// ─── Sample Policy ─────────────────────────────────────────────────────────
 const SAMPLE_POLICY = `{
   "Version": "2012-10-17",
   "Statement": [
@@ -43,447 +73,449 @@ const SAMPLE_POLICY = `{
   ]
 }`;
 
-export default function App() {
-  const [input, setInput] = useState(SAMPLE_POLICY);
-  const [analysis, setAnalysis] = useState<PolicyAnalysis>({ isValid: false, issues: [] });
-  const [aiAnalysis, setAiAnalysis] = useState<string | null>(null);
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
+// ─── Dangerous / privilege-escalation actions ──────────────────────────────
+const DANGEROUS_ACTIONS = [
+  'iam:CreateAccessKey', 'iam:CreateLoginProfile', 'iam:UpdateLoginProfile',
+  'iam:PutUserPolicy', 'iam:AttachUserPolicy', 'iam:PutRolePolicy',
+  'iam:AttachRolePolicy', 'iam:UpdateAssumeRolePolicy', 'iam:CreatePolicyVersion',
+  'iam:SetDefaultPolicyVersion', 'iam:PassRole',
+];
 
-  const ai = useMemo(() => new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY }), []);
+// ─── Validation Engine ─────────────────────────────────────────────────────
+function validatePolicy(json: string): PolicyAnalysis {
+  const issues: ValidationIssue[] = [];
+  if (!json.trim()) return { isValid: false, issues, score: 0 };
 
-  const validatePolicy = (json: string): PolicyAnalysis => {
-    const issues: ValidationIssue[] = [];
-    let parsed: any;
+  let parsed: any;
+  try {
+    parsed = JSON.parse(json);
+  } catch (e: any) {
+    return {
+      isValid: false,
+      issues: [{ id: 'json-syntax', severity: 'critical', message: `JSON parse error: ${e.message}`, field: 'Syntax' }],
+      score: 0,
+    };
+  }
 
-    try {
-      if (!json.trim()) return { isValid: false, issues: [] };
-      parsed = JSON.parse(json);
-    } catch (e: any) {
-      return {
-        isValid: false,
-        issues: [{
-          id: 'json-syntax',
-          severity: 'critical',
-          message: `JSON Syntax Error: ${e.message}`,
-        }]
-      };
+  if (!parsed.Version) {
+    issues.push({ id: 'version', severity: 'info', message: 'Missing "Version" field. Recommended: "2012-10-17"', field: 'Version', suggestion: 'Add "Version": "2012-10-17" at the top level.' });
+  }
+  if (!parsed.Statement) {
+    issues.push({ id: 'no-stmt', severity: 'critical', message: 'Missing required "Statement" field.', field: 'Statement' });
+    return { isValid: false, issues, score: 0 };
+  }
+
+  const stmts: any[] = Array.isArray(parsed.Statement) ? parsed.Statement : [parsed.Statement];
+
+  stmts.forEach((s: any, i: number) => {
+    if (!s.Effect || !['Allow', 'Deny'].includes(s.Effect)) {
+      issues.push({ id: `effect-${i}`, severity: 'critical', message: `Statement[${i}]: invalid or missing Effect "${s.Effect}".`, field: 'Effect', statementIndex: i });
+    }
+    if (!s.Action && !s.NotAction) {
+      issues.push({ id: `action-${i}`, severity: 'critical', message: `Statement[${i}]: must have Action or NotAction.`, field: 'Action', statementIndex: i });
     }
 
-    // Basic structure check
-    if (!parsed.Statement) {
-      issues.push({
-        id: 'missing-statement',
-        severity: 'critical',
-        message: 'Policy is missing required "Statement" field.',
-      });
-    }
-
-    const statements = Array.isArray(parsed.Statement) ? parsed.Statement : [parsed.Statement];
-
-    statements.forEach((stmt: any, index) => {
-      // Effect check
-      if (!stmt.Effect || !['Allow', 'Deny'].includes(stmt.Effect)) {
-        issues.push({
-          id: `invalid-effect-${index}`,
-          severity: 'critical',
-          message: `Statement[${index}] has an invalid or missing "Effect". Must be "Allow" or "Deny".`,
-          statementIndex: index,
-          field: 'Effect'
-        });
+    const actions: string[] = [].concat(s.Action || []);
+    actions.forEach((a: string) => {
+      if (a === '*') {
+        issues.push({ id: `admin-${i}`, severity: 'critical', message: `Statement[${i}]: Action "*" grants full administrator access.`, field: 'Action', statementIndex: i, suggestion: 'Restrict to specific service actions like s3:GetObject.' });
+      } else if (a?.endsWith(':*')) {
+        issues.push({ id: `svc-wild-${i}-${a}`, severity: 'warning', message: `Statement[${i}]: Service-wide wildcard "${a}".`, field: 'Action', statementIndex: i, suggestion: 'Enumerate only the required actions.' });
       }
-
-      // Action check
-      if (!stmt.Action && !stmt.NotAction) {
-        issues.push({
-          id: `missing-action-${index}`,
-          severity: 'critical',
-          message: `Statement[${index}] must have "Action" or "NotAction".`,
-          statementIndex: index,
-        });
+      if (DANGEROUS_ACTIONS.includes(a) && s.Effect === 'Allow') {
+        issues.push({ id: `escalation-${i}-${a}`, severity: 'critical', message: `Statement[${i}]: "${a}" enables privilege escalation.`, field: 'Action', statementIndex: i, suggestion: 'Scope with Resource ARNs and Condition keys.' });
       }
-
-      const actions = Array.isArray(stmt.Action) ? stmt.Action : [stmt.Action];
-      actions.forEach((action: string) => {
-        if (action === '*') {
-          issues.push({
-            id: `full-admin-action-${index}`,
-            severity: 'critical',
-            message: `Statement[${index}] provides full "*" (Administrative) access.`,
-            statementIndex: index,
-            field: 'Action',
-            suggestion: 'Restrict actions to specific service prefixes (e.g., s3:GetObject).'
-          });
-        } else if (action && action.endsWith(':*')) {
-          issues.push({
-            id: `service-wildcard-${index}-${action}`,
-            severity: 'warning',
-            message: `Statement[${index}] uses a service-wide wildcard: "${action}".`,
-            statementIndex: index,
-            field: 'Action',
-            suggestion: 'Specify only the necessary permissions.'
-          });
-        }
-      });
-
-      // Resource check
-      if (!stmt.Resource && !stmt.NotResource) {
-        issues.push({
-          id: `missing-resource-${index}`,
-          severity: 'critical',
-          message: `Statement[${index}] must have "Resource" or "NotResource".`,
-          statementIndex: index,
-        });
-      }
-
-      const resources = Array.isArray(stmt.Resource) ? stmt.Resource : [stmt.Resource];
-      resources.forEach((resource: string) => {
-        if (resource === '*' && stmt.Effect === 'Allow') {
-          issues.push({
-            id: `unrestricted-resource-${index}`,
-            severity: 'warning',
-            message: `Statement[${index}] allows access to all resources ("*").`,
-            statementIndex: index,
-            field: 'Resource',
-            suggestion: 'Specify the ARN of the target resource.'
-          });
-        }
-      });
-
-      // privilege escalation checks
-      const dangerousActions = [
-        'iam:CreateAccessKey',
-        'iam:CreateLoginProfile',
-        'iam:UpdateLoginProfile',
-        'iam:PutUserPolicy',
-        'iam:AttachUserPolicy',
-        'iam:PutRolePolicy',
-        'iam:AttachRolePolicy',
-        'iam:UpdateAssumeRolePolicy',
-        'iam:CreatePolicyVersion',
-        'iam:SetDefaultPolicyVersion',
-        'iam:PassRole'
-      ];
-
-      actions.forEach((action: string) => {
-        if (dangerousActions.includes(action) && stmt.Effect === 'Allow') {
-          issues.push({
-            id: `potential-escalation-${index}-${action}`,
-            severity: 'critical',
-            message: `Potential privilege escalation: "${action}" allowed.`,
-            statementIndex: index,
-            field: 'Action',
-            suggestion: 'Use Resource constraints and conditions to limit which users/roles can be modified.'
-          });
-        }
-      });
     });
 
-    return {
-      isValid: issues.filter(i => i.severity === 'critical').length === 0,
-      issues,
-      raw: parsed
-    };
+    if (!s.Resource && !s.NotResource) {
+      issues.push({ id: `resource-${i}`, severity: 'critical', message: `Statement[${i}]: must have Resource or NotResource.`, field: 'Resource', statementIndex: i });
+    }
+    const resources: string[] = [].concat(s.Resource || []);
+    resources.forEach((r: string) => {
+      if (r === '*' && s.Effect === 'Allow') {
+        issues.push({ id: `all-res-${i}`, severity: 'warning', message: `Statement[${i}]: Resource "*" applies to all AWS resources.`, field: 'Resource', statementIndex: i, suggestion: 'Specify the target ARN (e.g. arn:aws:s3:::my-bucket/*).' });
+      }
+    });
+
+    if (!s.Condition && s.Effect === 'Allow' && actions.some((a: string) => DANGEROUS_ACTIONS.includes(a))) {
+      issues.push({ id: `no-cond-${i}`, severity: 'warning', message: `Statement[${i}]: Sensitive action has no Condition block.`, field: 'Condition', statementIndex: i, suggestion: 'Add conditions like aws:RequestedRegion or aws:PrincipalTag.' });
+    }
+  });
+
+  const crits = issues.filter(i => i.severity === 'critical').length;
+  const warns = issues.filter(i => i.severity === 'warning').length;
+  const score = Math.max(0, 100 - crits * 35 - warns * 10);
+  return { isValid: crits === 0, issues, score, raw: parsed };
+}
+
+// ─── Score Ring Component ──────────────────────────────────────────────────
+function ScoreRing({ score }: { score: number }) {
+  const R = 52;
+  const circumference = 2 * Math.PI * R;
+  const pct = score / 100;
+  const color = score >= 80 ? '#30A46C' : score >= 50 ? '#F0A500' : '#E5484D';
+  const label = score >= 80 ? 'SECURE' : score >= 50 ? 'AT RISK' : 'CRITICAL';
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
+      <svg width="136" height="136" viewBox="0 0 136 136">
+        {/* Track ring */}
+        <circle cx="68" cy="68" r={R} fill="none" stroke="#1A2236" strokeWidth="10" />
+        {/* Animated progress arc */}
+        <circle
+          cx="68" cy="68" r={R}
+          fill="none"
+          stroke={color}
+          strokeWidth="10"
+          strokeDasharray={`${pct * circumference} ${circumference}`}
+          strokeDashoffset={circumference * 0.25}
+          strokeLinecap="round"
+          transform="rotate(-90 68 68)"
+          style={{
+            transition: 'stroke-dasharray 0.6s cubic-bezier(.4,0,.2,1), stroke 0.4s ease',
+            filter: `drop-shadow(0 0 8px ${color}99)`,
+          }}
+        />
+        <text x="68" y="64" textAnchor="middle" fill="white" fontSize="26" fontWeight="700" fontFamily="'JetBrains Mono', monospace">{score}</text>
+        <text x="68" y="80" textAnchor="middle" fill="#4A5568" fontSize="9" fontFamily="'Space Grotesk', sans-serif" letterSpacing="2">/100</text>
+      </svg>
+      <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: 3, color, fontFamily: "'Space Grotesk', sans-serif" }}>{label}</span>
+    </div>
+  );
+}
+
+// ─── Issue Card Component ──────────────────────────────────────────────────
+function IssueCard({ issue, index }: { issue: ValidationIssue; index: number }) {
+  const palette = {
+    critical: { border: '#E5484D44', bar: '#E5484D', badgeBg: '#2D1517', badgeText: '#FC8181' },
+    warning:  { border: '#F0A50044', bar: '#F0A500', badgeBg: '#2D2008', badgeText: '#FBD38D' },
+    info:     { border: '#4A90D944', bar: '#4A90D9', badgeBg: '#0D1F35', badgeText: '#90CDF4' },
   };
+  const c = palette[issue.severity];
+
+  return (
+    <div style={{
+      background: '#0D1526', border: `1px solid ${c.border}`, borderRadius: 8,
+      padding: '12px 14px', position: 'relative', overflow: 'hidden',
+      animation: `sentinelSlideIn 0.25s ease both`,
+      animationDelay: `${index * 40}ms`,
+    }}>
+      {/* Left severity bar */}
+      <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 3, background: c.bar, borderRadius: '8px 0 0 8px' }} />
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+        <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: 1.5, color: c.badgeText, background: c.badgeBg, padding: '2px 7px', borderRadius: 4, fontFamily: "'Space Grotesk', sans-serif", textTransform: 'uppercase' as const }}>
+          {issue.severity}
+        </span>
+        {issue.field && <span style={{ fontSize: 9, color: '#4A5568', fontFamily: 'monospace', letterSpacing: 1 }}>• {issue.field}</span>}
+        {issue.statementIndex !== undefined && (
+          <span style={{ marginLeft: 'auto', fontSize: 9, color: '#2D3748', fontFamily: 'monospace' }}>STMT[{issue.statementIndex}]</span>
+        )}
+      </div>
+      <p style={{ margin: 0, fontSize: 12, color: '#CBD5E0', lineHeight: 1.6, fontFamily: "'Space Grotesk', sans-serif" }}>{issue.message}</p>
+      {issue.suggestion && (
+        <p style={{ margin: '8px 0 0', fontSize: 11, color: '#718096', lineHeight: 1.5, fontFamily: "'Space Grotesk', sans-serif", paddingTop: 8, borderTop: '1px solid #1A2236' }}>
+          <span style={{ color: '#F0A500', marginRight: 6 }}>→</span>{issue.suggestion}
+        </p>
+      )}
+    </div>
+  );
+}
+
+// ─── AI Panel Component ────────────────────────────────────────────────────
+function AIPanel({ content, loading }: { content: string | null; loading: boolean }) {
+  if (loading) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '32px 0', color: '#4A5568' }}>
+        <div style={{ width: 16, height: 16, border: '2px solid #F0A500', borderTopColor: 'transparent', borderRadius: '50%', animation: 'sentinelSpin 0.8s linear infinite', flexShrink: 0 }} />
+        <span style={{ fontSize: 12, fontFamily: "'Space Grotesk', sans-serif" }}>Consulting AI security advisor…</span>
+      </div>
+    );
+  }
+
+  if (!content) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12, padding: '40px 20px', textAlign: 'center' }}>
+        <div style={{ width: 48, height: 48, background: '#0D1526', borderRadius: 12, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#F0A50066' }}>
+          <SparklesIcon size={24} />
+        </div>
+        <p style={{ fontSize: 12, color: '#4A5568', lineHeight: 1.6, fontFamily: "'Space Grotesk', sans-serif" }}>
+          Run AI Security Analysis to get a detailed threat assessment and remediation plan.
+        </p>
+      </div>
+    );
+  }
+
+  // Lightweight markdown renderer: bold, inline code, headers, bullets
+  const html = content
+    .replace(/\*\*(.+?)\*\*/g, '<strong style="color:#F0A500">$1</strong>')
+    .replace(/`(.+?)`/g, '<code style="background:#1A2236;padding:1px 5px;border-radius:3px;font-family:\'JetBrains Mono\',monospace;color:#FBD38D;font-size:11px">$1</code>')
+    .replace(/^### (.+)/gm, '<p style="font-size:12px;font-weight:700;color:white;margin:14px 0 4px;letter-spacing:0.5px">$1</p>')
+    .replace(/^## (.+)/gm, '<p style="font-size:13px;font-weight:700;color:white;margin:16px 0 6px">$1</p>')
+    .replace(/^- (.+)/gm, '<div style="display:flex;gap:8px;margin:3px 0;font-size:12px;color:#A0AEC0;line-height:1.6"><span style="color:#F0A500;margin-top:2px">›</span><span>$1</span></div>')
+    .replace(/\n\n/g, '<br/>')
+    .replace(/^(?!<[pdb]|<div|<strong|<br)(.+)/gm, '<p style="font-size:12px;color:#A0AEC0;margin:4px 0;line-height:1.6">$1</p>');
+
+  return (
+    <div
+      style={{ animation: 'sentinelFadeIn 0.4s ease', fontFamily: "'Space Grotesk', sans-serif" }}
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
+  );
+}
+
+// ─── Spinner helper ────────────────────────────────────────────────────────
+function Spinner() {
+  return (
+    <div style={{ width: 12, height: 12, border: '2px solid #4A5568', borderTopColor: '#F0A500', borderRadius: '50%', animation: 'sentinelSpin 0.8s linear infinite', flexShrink: 0 }} />
+  );
+}
+
+// ─── AI caller (Anthropic Claude via direct fetch) ─────────────────────────
+async function callClaude(prompt: string): Promise<string> {
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1000,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+    });
+    const data = await res.json();
+    return data.content?.map((b: any) => b.text || '').join('') || 'No response received.';
+  } catch {
+    return 'AI request failed. Please check your connection.';
+  }
+}
+
+// ─── Global styles injected once ──────────────────────────────────────────
+const GLOBAL_STYLES = `
+  @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+  @keyframes sentinelSlideIn {
+    from { opacity: 0; transform: translateX(12px); }
+    to   { opacity: 1; transform: none; }
+  }
+  @keyframes sentinelFadeIn {
+    from { opacity: 0; transform: translateY(8px); }
+    to   { opacity: 1; transform: none; }
+  }
+  @keyframes sentinelSpin  { to { transform: rotate(360deg); } }
+  @keyframes sentinelPulse { 0%,100% { opacity:1 } 50% { opacity:0.4 } }
+  body { background: #060B18 !important; }
+  textarea:focus { outline: none; }
+  textarea { caret-color: #F0A500; }
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #1A2236; border-radius: 4px; }
+`;
+
+// ─── Main App ──────────────────────────────────────────────────────────────
+export default function App() {
+  const [input, setInput]         = useState(SAMPLE_POLICY);
+  const [analysis, setAnalysis]   = useState<PolicyAnalysis>(() => validatePolicy(SAMPLE_POLICY));
+  const [aiText, setAiText]       = useState<string | null>(null);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isFixing, setIsFixing]   = useState(false);
+  const [copied, setCopied]       = useState(false);
+  const [activeTab, setActiveTab] = useState<'issues' | 'ai'>('issues');
 
   useEffect(() => {
     setAnalysis(validatePolicy(input));
-    setAiAnalysis(null);
+    setAiText(null);
   }, [input]);
 
-  const handleAiAnalysis = async () => {
-    if (!analysis.raw) return;
-    setIsAnalyzing(true);
-    try {
-      const response = await ai.models.generateContent({
-        model: "gemini-3.1-pro-preview",
-        contents: `Analyze this AWS IAM Policy for security risks and provide a brief summary of findings and recommendations in markdown format. 
-        Focus on the principle of least privilege.
-        Policy:
-        ${JSON.stringify(analysis.raw, null, 2)}`,
-      });
-      setAiAnalysis(response.text || "No AI feedback available.");
-    } catch (error) {
-      console.error(error);
-      setAiAnalysis("Failed to get AI analysis. Please check your API key.");
-    } finally {
-      setIsAnalyzing(false);
-    }
-  };
+  const crits = analysis.issues.filter(i => i.severity === 'critical').length;
+  const warns = analysis.issues.filter(i => i.severity === 'warning').length;
+  const infos = analysis.issues.filter(i => i.severity === 'info').length;
+  const score = analysis.score ?? 0;
 
-  const [isFixing, setIsFixing] = useState(false);
+  const handleAnalyze = async () => {
+    if (!analysis.raw || isAnalyzing) return;
+    setIsAnalyzing(true);
+    setActiveTab('ai');
+    setAiText(null);
+    const text = await callClaude(
+      `You are an AWS IAM security expert. Analyze this IAM policy and provide a concise security report in markdown. Cover: 1) Key risks found, 2) Principle of least privilege violations, 3) Specific remediation steps. Be direct and actionable.\n\nPolicy:\n${JSON.stringify(analysis.raw, null, 2)}`
+    );
+    setAiText(text);
+    setIsAnalyzing(false);
+  };
 
   const handleSmartFix = async () => {
-    if (!analysis.raw) return;
+    if (isFixing) return;
     setIsFixing(true);
-    try {
-      const response = await ai.models.generateContent({
-        model: "gemini-3.1-pro-preview",
-        contents: `Given the following AWS IAM policy that has security issues, provide a "Fixed" version that adheres to the principle of least privilege. 
-        Only return the valid JSON policy, no other text.
-        Policy:
-        ${input}`,
-      });
-      const fixedJson = response.text?.replace(/```json|```/g, '').trim();
-      if (fixedJson) {
-        setInput(fixedJson);
-      }
-    } catch (error) {
-      console.error(error);
-    } finally {
-      setIsFixing(false);
-    }
+    const text = await callClaude(
+      `You are an AWS IAM security expert applying the principle of least privilege. Fix this IAM policy to be secure. Return ONLY valid JSON, no explanation, no markdown fences.\n\nPolicy:\n${input}`
+    );
+    const clean = text.replace(/```json|```/g, '').trim();
+    try { JSON.parse(clean); setInput(clean); } catch { /* keep original if parse fails */ }
+    setIsFixing(false);
   };
 
-  const criticalCount = analysis.issues.filter(i => i.severity === 'critical').length;
-  const warningCount = analysis.issues.filter(i => i.severity === 'warning').length;
+  const handleCopy = () => {
+    navigator.clipboard.writeText(input);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
 
   return (
-    <div className="min-h-screen bg-[#0B0E14] text-slate-300 font-sans selection:bg-amber-500/30 flex flex-col">
-      {/* Navigation */}
-      <nav className="h-16 border-b border-slate-800 flex items-center justify-between px-6 bg-[#0F1219] sticky top-0 z-50 shrink-0">
-        <div className="flex items-center gap-4">
-          <div className="w-8 h-8 bg-amber-500 rounded-sm flex items-center justify-center text-black shadow-lg shadow-amber-500/10">
-            <Shield className="w-5 h-5" />
-          </div>
-          <div className="flex items-center gap-3">
-            <h1 className="text-lg font-semibold tracking-tight text-white flex items-center gap-1">
-              Sentinel<span className="text-amber-500">IAM</span>
-            </h1>
-            <div className="h-4 w-[1px] bg-slate-700 hidden sm:block"></div>
-            <span className="text-[10px] font-mono text-slate-500 uppercase tracking-widest hidden md:block">Policy Linter v2.4.0</span>
-          </div>
-        </div>
-        <div className="flex items-center gap-3">
-          <button 
-            onClick={() => navigator.clipboard.writeText(input)}
-            className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium rounded border border-slate-700 transition-colors flex items-center gap-2"
-          >
-            <Copy className="w-3 h-3" />
-            <span className="hidden sm:inline">Copy</span>
-          </button>
-          <button 
-            onClick={() => setInput('')}
-            className="px-4 py-2 bg-slate-800 hover:bg-red-900/30 text-red-400 text-xs font-medium rounded border border-slate-700 hover:border-red-500/50 transition-colors flex items-center gap-2"
-          >
-            <Trash2 className="w-3 h-3" />
-            <span className="hidden sm:inline">Clear</span>
-          </button>
-        </div>
-      </nav>
+    <>
+      <style>{GLOBAL_STYLES}</style>
+      <div style={{ height: '100vh', background: '#060B18', display: 'flex', flexDirection: 'column', fontFamily: "'Space Grotesk', sans-serif", color: '#CBD5E0', overflow: 'hidden' }}>
 
-      <main className="flex-1 flex flex-col lg:flex-row overflow-hidden">
-        {/* Editor Section */}
-        <section className="flex-1 flex flex-col border-r border-slate-800 bg-[#0B0E14] overflow-hidden min-h-[400px]">
-          <div className="h-10 border-b border-slate-800 flex items-center justify-between px-4 bg-[#13171F] shrink-0">
-            <div className="flex items-center h-full">
-              <div className="text-[10px] uppercase tracking-wider font-bold text-amber-500 border-b-2 border-amber-500 h-full flex items-center gap-2 px-2">
-                <Terminal className="w-3 h-3" />
-                policy.json
+        {/* ── Navbar ── */}
+        <nav style={{ height: 56, borderBottom: '1px solid #0D1526', background: '#080D1A', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 20px', flexShrink: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <div style={{ width: 34, height: 34, background: '#F0A500', borderRadius: 8, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#060B18', boxShadow: '0 0 20px #F0A50033' }}>
+              <ShieldIcon size={18} />
+            </div>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 1 }}>
+              <span style={{ fontSize: 17, fontWeight: 700, color: 'white', letterSpacing: '-0.3px' }}>Sentinel</span>
+              <span style={{ fontSize: 17, fontWeight: 700, color: '#F0A500', letterSpacing: '-0.3px' }}>IAM</span>
+            </div>
+            <div style={{ height: 16, width: 1, background: '#1A2236', margin: '0 4px' }} />
+            <span style={{ fontSize: 10, fontFamily: "'JetBrains Mono', monospace", color: '#2D3748', letterSpacing: 2, textTransform: 'uppercase' as const }}>Policy Linter v2.4</span>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <button onClick={handleCopy} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 12px', background: '#0D1526', border: '1px solid #1A2236', borderRadius: 6, color: copied ? '#30A46C' : '#718096', fontSize: 12, fontWeight: 500, cursor: 'pointer', transition: 'all 0.2s', fontFamily: "'Space Grotesk', sans-serif" }}>
+              {copied ? <CheckIcon /> : <CopyIcon />}{copied ? 'Copied' : 'Copy'}
+            </button>
+            <button onClick={() => { setInput(''); setAiText(null); }} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 12px', background: '#0D1526', border: '1px solid #1A2236', borderRadius: 6, color: '#718096', fontSize: 12, fontWeight: 500, cursor: 'pointer', fontFamily: "'Space Grotesk', sans-serif" }}>
+              <TrashIcon />Clear
+            </button>
+          </div>
+        </nav>
+
+        {/* ── Main content ── */}
+        <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+
+          {/* Editor column */}
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', borderRight: '1px solid #0D1526', minWidth: 0 }}>
+            {/* Editor header */}
+            <div style={{ height: 40, borderBottom: '1px solid #0D1526', background: '#080D1A', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 16px', flexShrink: 0 }}>
+              <div style={{ height: '100%', display: 'flex', alignItems: 'center', gap: 8, borderBottom: '2px solid #F0A500', padding: '0 4px' }}>
+                <TerminalIcon /><span style={{ fontSize: 11, fontFamily: "'JetBrains Mono', monospace", color: '#F0A500', fontWeight: 500 }}>policy.json</span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                {crits > 0 && <span style={{ fontSize: 10, color: '#FC8181', background: '#2D1517', border: '1px solid #E5484D33', padding: '2px 8px', borderRadius: 4, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase' as const }}>{crits} Critical</span>}
+                {warns > 0 && <span style={{ fontSize: 10, color: '#FBD38D', background: '#2D2008', border: '1px solid #F0A50033', padding: '2px 8px', borderRadius: 4, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase' as const }}>{warns} Warning</span>}
+                {analysis.isValid && input.trim() && <span style={{ fontSize: 10, color: '#68D391', background: '#1A2D22', border: '1px solid #30A46C33', padding: '2px 8px', borderRadius: 4, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase' as const }}>✓ Valid</span>}
               </div>
             </div>
-            <div className="flex items-center gap-3">
-               {criticalCount > 0 ? (
-                 <span className="flex items-center gap-1.5 text-[10px] text-red-400 font-bold px-2 py-0.5 bg-red-950/30 rounded border border-red-500/30 uppercase tracking-wider">
-                    {criticalCount} Critical
-                 </span>
-               ) : analysis.isValid && input.trim() ? (
-                <span className="flex items-center gap-1.5 text-[10px] text-green-400 font-bold px-2 py-0.5 bg-green-950/30 rounded border border-green-500/30 uppercase tracking-wider">
-                    Valid Schema
-                 </span>
-               ) : null}
-            </div>
-          </div>
-          
-          <div className="flex-1 relative flex">
-             {/* Simulated Line Numbers */}
-            <div className="w-12 bg-[#0B0E14] border-r border-slate-800 flex flex-col items-center pt-6 text-slate-600 select-none font-mono text-[10px] leading-[20px] shrink-0">
-               {Array.from({ length: 40 }).map((_, i) => (
-                 <span key={i}>{i + 1}</span>
-               ))}
-            </div>
+            {/* Textarea */}
             <textarea
               value={input}
-              onChange={(e) => setInput(e.target.value)}
-              className="flex-1 p-6 font-mono text-sm bg-transparent border-none focus:outline-none resize-none text-slate-300 placeholder-slate-700 leading-[20px]"
-              placeholder="Paste your IAM JSON policy here..."
+              onChange={e => setInput(e.target.value)}
               spellCheck={false}
+              placeholder="Paste your AWS IAM JSON policy here…"
+              style={{ flex: 1, padding: '20px 24px', fontFamily: "'JetBrains Mono', monospace", fontSize: 13, lineHeight: 1.7, background: '#060B18', border: 'none', color: '#A0AEC0', resize: 'none', width: '100%' }}
             />
-          </div>
-        </section>
-
-        {/* Results Section */}
-        <section className="w-full lg:w-96 flex flex-col bg-[#0F1219] overflow-hidden shrink-0 border-t lg:border-t-0 border-slate-800">
-          <div className="p-4 border-b border-slate-800 bg-[#13171F]">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-[10px] font-bold uppercase tracking-[0.15em] text-slate-500">Analysis Results</h2>
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={handleSmartFix}
-                  disabled={!analysis.isValid || isFixing}
-                  title="Auto-Fix Policy"
-                  className="p-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded border border-slate-700 disabled:opacity-30 transition-all shadow-sm"
-                >
-                  <ShieldCheck className={`w-3.5 h-3.5 text-green-500 ${isFixing ? 'animate-pulse' : ''}`} />
-                </button>
-                <button
-                  onClick={handleAiAnalysis}
-                  disabled={!analysis.isValid || isAnalyzing}
-                  className="flex items-center gap-2 px-3 py-1.5 bg-amber-600 hover:bg-amber-500 text-black rounded text-[10px] font-bold transition-all disabled:opacity-30 uppercase tracking-wider"
-                >
-                  <Sparkles className={`w-3 h-3 ${isAnalyzing ? 'animate-spin' : ''}`} />
-                  {isAnalyzing ? 'Analyzing' : 'AI Analysis'}
-                </button>
+            {/* Editor footer */}
+            <div style={{ height: 32, borderTop: '1px solid #0D1526', background: '#080D1A', display: 'flex', alignItems: 'center', padding: '0 16px', gap: 20, flexShrink: 0 }}>
+              <span style={{ fontSize: 10, fontFamily: "'JetBrains Mono', monospace", color: '#2D3748' }}>UTF-8</span>
+              <span style={{ fontSize: 10, fontFamily: "'JetBrains Mono', monospace", color: '#2D3748' }}>LEN: {input.length}</span>
+              <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6 }}>
+                <div style={{ width: 6, height: 6, borderRadius: '50%', background: '#30A46C', boxShadow: '0 0 6px #30A46C88', animation: 'sentinelPulse 2s infinite' }} />
+                <span style={{ fontSize: 10, fontFamily: "'JetBrains Mono', monospace", color: '#2D3748' }}>LIVE</span>
               </div>
             </div>
+          </div>
 
-            {/* Scoreboard Style Summary */}
-            <div className="flex items-end justify-between bg-slate-900/50 p-4 rounded border border-slate-800/50">
-              <div className="flex flex-col">
-                <span className="text-[10px] font-mono text-slate-600 uppercase mb-1">Security Health</span>
-                <div className="flex items-baseline gap-1">
-                  <span className={`text-3xl font-mono font-bold ${criticalCount > 0 ? 'text-red-500' : 'text-green-500'}`}>
-                    {Math.max(0, 100 - (criticalCount * 40 + warningCount * 10))}
-                  </span>
-                  <span className="text-xs text-slate-700 font-mono">/100</span>
+          {/* Right panel */}
+          <div style={{ width: 380, display: 'flex', flexDirection: 'column', background: '#080D1A', flexShrink: 0, borderLeft: '1px solid #0D1526' }}>
+
+            {/* Score ring + stat grid + action buttons */}
+            <div style={{ padding: '20px 20px 16px', borderBottom: '1px solid #0D1526' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 20 }}>
+                <ScoreRing score={score} />
+                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  {/* Stat grid */}
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 6 }}>
+                    {([
+                      { label: 'Critical', val: crits, color: '#E5484D' },
+                      { label: 'Warning',  val: warns, color: '#F0A500' },
+                      { label: 'Info',     val: infos, color: '#4A90D9' },
+                    ] as const).map(s => (
+                      <div key={s.label} style={{ background: '#0D1526', border: '1px solid #1A2236', borderRadius: 6, padding: '8px 10px', textAlign: 'center' as const }}>
+                        <div style={{ fontSize: 18, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace", color: s.val > 0 ? s.color : '#2D3748' }}>{s.val}</div>
+                        <div style={{ fontSize: 9, color: '#4A5568', letterSpacing: 1, textTransform: 'uppercase' as const, marginTop: 2 }}>{s.label}</div>
+                      </div>
+                    ))}
+                  </div>
+                  {/* AI Analysis button */}
+                  <button
+                    onClick={handleAnalyze}
+                    disabled={!analysis.raw || isAnalyzing}
+                    style={{ width: '100%', padding: '8px 0', background: isAnalyzing ? '#1A2236' : '#F0A500', color: isAnalyzing ? '#4A5568' : '#060B18', border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 700, cursor: isAnalyzing ? 'default' : 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, transition: 'all 0.2s', letterSpacing: 0.5, fontFamily: "'Space Grotesk', sans-serif" }}
+                  >
+                    {isAnalyzing ? <Spinner /> : <SparklesIcon />}
+                    {isAnalyzing ? 'Analyzing…' : 'AI Security Analysis'}
+                  </button>
+                  {/* Smart Fix button */}
+                  <button
+                    onClick={handleSmartFix}
+                    disabled={isFixing}
+                    style={{ width: '100%', padding: '8px 0', background: 'transparent', color: isFixing ? '#4A5568' : '#718096', border: '1px solid #1A2236', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: isFixing ? 'default' : 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, transition: 'all 0.2s', fontFamily: "'Space Grotesk', sans-serif" }}
+                  >
+                    {isFixing ? <Spinner /> : <WandIcon />}
+                    {isFixing ? 'Applying fix…' : 'Smart Auto-Fix'}
+                  </button>
                 </div>
               </div>
-              <span className={`text-[9px] font-bold px-2 py-1 rounded border uppercase tracking-wider ${
-                criticalCount > 0 
-                  ? 'bg-red-900/20 text-red-400 border-red-800' 
-                  : 'bg-green-900/20 text-green-400 border-green-800'
-              }`}>
-                {criticalCount > 0 ? 'High Risk' : 'Secure'}
-              </span>
             </div>
-          </div>
 
-          <div className="flex-1 overflow-y-auto custom-scrollbar">
-            <div className="p-4 space-y-4">
-              {!input.trim() ? (
-                  <div className="bg-slate-900/40 rounded border border-dashed border-slate-800 p-8 flex flex-col items-center justify-center text-center gap-3">
-                      <div className="p-3 bg-slate-800 rounded-full">
-                        <Info className="w-6 h-6 text-slate-600" />
-                      </div>
+            {/* Tabs */}
+            <div style={{ display: 'flex', borderBottom: '1px solid #0D1526', flexShrink: 0 }}>
+              {([
+                { id: 'issues' as const, label: `Issues${analysis.issues.length ? ` (${analysis.issues.length})` : ''}` },
+                { id: 'ai'     as const, label: 'AI Advisory' },
+              ]).map(t => (
+                <button key={t.id} onClick={() => setActiveTab(t.id)} style={{ flex: 1, padding: '10px 0', background: 'none', border: 'none', borderBottom: activeTab === t.id ? '2px solid #F0A500' : '2px solid transparent', color: activeTab === t.id ? '#F0A500' : '#4A5568', fontSize: 11, fontWeight: 600, cursor: 'pointer', letterSpacing: 0.5, textTransform: 'uppercase' as const, fontFamily: "'Space Grotesk', sans-serif", transition: 'all 0.2s' }}>
+                  {t.label}
+                </button>
+              ))}
+            </div>
+
+            {/* Tab content */}
+            <div style={{ flex: 1, overflowY: 'auto', padding: 16 }}>
+              {activeTab === 'issues' && (
+                <>
+                  {!input.trim() && (
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12, padding: '40px 20px', textAlign: 'center' as const }}>
+                      <div style={{ width: 48, height: 48, background: '#0D1526', borderRadius: 12, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#2D3748' }}><LockIcon /></div>
+                      <p style={{ fontSize: 12, color: '#4A5568', fontFamily: "'Space Grotesk', sans-serif" }}>Paste an IAM policy to begin analysis</p>
+                    </div>
+                  )}
+                  {input.trim() && analysis.issues.length === 0 && (
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12, padding: '40px 20px', textAlign: 'center' as const, background: '#0D1526', border: '1px solid #30A46C22', borderRadius: 10 }}>
+                      <div style={{ width: 48, height: 48, background: '#1A2D22', borderRadius: 12, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#30A46C' }}><CheckIcon size={24} /></div>
                       <div>
-                          <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Awaiting Input</p>
+                        <p style={{ fontSize: 13, fontWeight: 700, color: '#30A46C', letterSpacing: 0.5, fontFamily: "'Space Grotesk', sans-serif" }}>Integrity Pass</p>
+                        <p style={{ fontSize: 11, color: '#2D5640', marginTop: 4, fontFamily: "'Space Grotesk', sans-serif" }}>No logical vulnerabilities detected</p>
                       </div>
+                    </div>
+                  )}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                    {analysis.issues.map((issue, i) => <IssueCard key={issue.id} issue={issue} index={i} />)}
                   </div>
-              ) : (
-                  <>
-                    <AnimatePresence>
-                      {analysis.issues.map((issue) => (
-                        <motion.div
-                          layout
-                          initial={{ opacity: 0, x: 20 }}
-                          animate={{ opacity: 1, x: 0 }}
-                          exit={{ opacity: 0, x: -20 }}
-                          key={issue.id}
-                          className={`p-3 rounded border bg-slate-800/40 relative overflow-hidden group ${
-                            issue.severity === 'critical' ? 'border-red-500/30' : issue.severity === 'warning' ? 'border-orange-500/30' : 'border-blue-500/30'
-                          }`}
-                        >
-                          <div className={`absolute top-0 left-0 w-1 h-full ${
-                             issue.severity === 'critical' ? 'bg-red-500' : issue.severity === 'warning' ? 'bg-orange-500' : 'bg-blue-500'
-                          }`} />
-                          
-                          <div className="flex items-center justify-between mb-2">
-                            <span className={`text-[9px] font-bold uppercase tracking-wider ${
-                               issue.severity === 'critical' ? 'text-red-400' : issue.severity === 'warning' ? 'text-orange-400' : 'text-blue-400'
-                            }`}>
-                              {issue.severity} {issue.field ? `• ${issue.field}` : ''}
-                            </span>
-                            {issue.statementIndex !== undefined && (
-                               <span className="text-[9px] font-mono text-slate-500">STMT #{issue.statementIndex}</span>
-                            )}
-                          </div>
-                          
-                          <p className="text-xs text-slate-200 font-semibold mb-2 leading-relaxed">{issue.message}</p>
-                          
-                          {issue.suggestion && (
-                             <div className="mt-2 text-[10px] text-slate-400 leading-relaxed border-t border-slate-700/50 pt-2 flex gap-2">
-                                <span className="text-amber-500 shrink-0 select-none">→</span>
-                                <i>{issue.suggestion}</i>
-                             </div>
-                          )}
-                        </motion.div>
-                      ))}
-                    </AnimatePresence>
-
-                    {input.trim() && analysis.issues.length === 0 && (
-                      <div className="bg-green-900/10 border border-green-500/20 p-6 rounded flex flex-col items-center text-center gap-3">
-                          <CheckCircle2 className="w-8 h-8 text-green-500 opacity-50" />
-                          <div>
-                              <p className="text-xs font-bold text-green-400 uppercase tracking-widest">Integrity Pass</p>
-                              <p className="text-[10px] text-green-700 mt-1 uppercase tracking-tight font-mono">No logical vulnerabilities detected</p>
-                          </div>
-                      </div>
-                    )}
-                  </>
+                </>
               )}
-
-              {/* AI Insights Section */}
-              <AnimatePresence>
-                {aiAnalysis && (
-                  <motion.div
-                    initial={{ opacity: 0, scale: 0.95 }}
-                    animate={{ opacity: 1, scale: 1 }}
-                    className="mt-6 border-t border-slate-800 pt-6"
-                  >
-                    <div className="flex items-center gap-2 mb-4">
-                      <Sparkles className="w-3.5 h-3.5 text-amber-500" />
-                      <h3 className="text-xs font-bold uppercase tracking-[0.15em] text-white">AI Security Advisory</h3>
-                    </div>
-                    <div className="bg-slate-900 p-4 rounded border border-slate-800 relative group overflow-hidden">
-                      <div className="markdown-body prose prose-invert prose-xs max-w-none prose-ul:my-2">
-                        <Markdown>{aiAnalysis}</Markdown>
-                      </div>
-                      {/* Decorative Element */}
-                      <div className="absolute -bottom-4 -right-4 w-12 h-12 bg-amber-500/5 rounded-full blur-xl group-hover:bg-amber-500/10 transition-colors" />
-                    </div>
-                  </motion.div>
-                )}
-              </AnimatePresence>
+              {activeTab === 'ai' && <AIPanel content={aiText} loading={isAnalyzing} />}
             </div>
           </div>
-        </section>
-      </main>
-
-      {/* Bottom Console / Footer */}
-      <footer className="h-12 border-t border-slate-800 bg-[#0B0E14] flex items-center px-6 justify-between shrink-0">
-        <div className="flex items-center gap-6">
-          <div className="flex items-center gap-2">
-            <div className={`w-2 h-2 rounded-full ${criticalCount > 0 ? 'bg-red-500 animate-pulse' : 'bg-slate-700'}`}></div>
-            <span className="text-[10px] font-mono text-slate-500 uppercase tracking-tighter">{criticalCount} Errors</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <div className={`w-2 h-2 rounded-full ${warningCount > 0 ? 'bg-orange-500' : 'bg-slate-700'}`}></div>
-            <span className="text-[10px] font-mono text-slate-500 uppercase tracking-tighter">{warningCount} Warnings</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <div className="w-2 h-2 rounded-full bg-green-500"></div>
-            <span className="text-[10px] font-mono text-slate-500 uppercase tracking-tighter">System Online</span>
-          </div>
         </div>
-        <div className="hidden lg:flex items-center gap-6 text-[10px] font-mono text-slate-600 uppercase tracking-widest">
-           <div className="flex gap-2">
-              <span className="text-slate-800">ENC:</span>
-              <span className="text-sky-500 font-bold">UTF-8</span>
-           </div>
-           <div className="flex gap-2">
-              <span className="text-slate-800">LEN:</span>
-              <span className="text-slate-400">{input.length}</span>
-           </div>
-           <div className="flex gap-2">
-              <span className="text-slate-800">MEM:</span>
-              <span className="text-slate-400">PAS</span>
-           </div>
-        </div>
-      </footer>
 
-      {/* Background Tech Overlay */}
-      <div className="fixed inset-0 pointer-events-none z-[-1] opacity-[0.02]" 
-           style={{ backgroundImage: 'linear-gradient(#fff 1px, transparent 1px), linear-gradient(90deg, #fff 1px, transparent 1px)', backgroundSize: '100px 100px' }}>
+        {/* ── Status bar ── */}
+        <div style={{ height: 28, borderTop: '1px solid #0D1526', background: '#060B18', display: 'flex', alignItems: 'center', padding: '0 16px', gap: 20, flexShrink: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <div style={{ width: 6, height: 6, borderRadius: '50%', background: crits > 0 ? '#E5484D' : '#30A46C', boxShadow: crits > 0 ? '0 0 6px #E5484D' : '0 0 6px #30A46C', animation: crits > 0 ? 'sentinelPulse 1.5s infinite' : 'none' }} />
+            <span style={{ fontSize: 10, fontFamily: "'JetBrains Mono', monospace", color: '#2D3748' }}>{crits} errors · {warns} warnings · {infos} info</span>
+          </div>
+          <div style={{ marginLeft: 'auto', fontSize: 10, fontFamily: "'JetBrains Mono', monospace", color: '#1A2236' }}>SentinelIAM · AWS IAM Policy Linter</div>
+        </div>
+
       </div>
-    </div>
+    </>
   );
 }
